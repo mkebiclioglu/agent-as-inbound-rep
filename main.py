@@ -42,15 +42,10 @@ mock_leads = [
         "company": "TechCorp Industries",
         "inquiry": "Interested in industrial 3D printers for prototyping. Need high precision and large build volume."
     },
-    {
-        "id": "lead_002", 
-        "name": "Sarah Johnson",
-        "email": "sarah.j@startup.com",
-        "phone": "+1-555-0456",
-        "company": "Innovation Startup",
-        "inquiry": "Looking for affordable desktop 3D printers for educational purposes. Need 5-10 units."
-    }
 ]
+
+# Conversation history storage
+conversation_history = {}
 
 # Simple product knowledge base
 product_knowledge = {
@@ -92,8 +87,6 @@ def get_lead(lead_id: str):
 def chat_with_lead(conversation: ConversationMessage):
     """Generate AI response for customer conversation"""
     try:
-
-        
         # Find the lead
         lead = None
         for l in mock_leads:
@@ -103,6 +96,10 @@ def chat_with_lead(conversation: ConversationMessage):
         
         if not lead:
             raise HTTPException(status_code=404, detail="Lead not found")
+        
+        # Initialize conversation history for this lead if it doesn't exist
+        if conversation.lead_id not in conversation_history:
+            conversation_history[conversation.lead_id] = []
         
         # Create system prompt
         system_prompt = f"""You are an expert inbound sales representative for Formlabs, a leading 3D printer manufacturer.
@@ -117,35 +114,72 @@ Available Products:
 
 Your role is to:
 1. Understand customer needs through discovery questions
-2. Provide relevant product recommendations
+2. Provide relevant product recommendations based on customer painpoints and needs
 3. Handle objections professionally
 4. Be conversational and helpful
+5. Remember previous parts of the conversation
 
-Respond naturally as if you're having a real phone conversation."""
+Respond naturally as if you're having a real phone conversation. 
+So your answers don't need to be too long and keep it conversational.
+Try to guide the conversation to the next step in the sales process which is either:
+1. Sending a quote based on the conversation
+2. Scheduling a follow up call with the customer at a later date
+"""
 
+        # Build messages array with conversation history
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Add conversation history (last 10 messages to keep context manageable)
+        for msg in conversation_history[conversation.lead_id][-10:]:
+            messages.append(msg)
+        
+        # Add current message
+        messages.append({"role": "user", "content": conversation.message})
+        
         # Generate response using OpenAI
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": conversation.message}
-            ],
+            messages=messages,
             max_tokens=200,
             temperature=0.7
         )
         ai_response = response.choices[0].message.content
         
+        # Store the conversation in history
+        conversation_history[conversation.lead_id].append({"role": "user", "content": conversation.message})
+        conversation_history[conversation.lead_id].append({"role": "assistant", "content": ai_response})
+        
         return {
             "lead_id": conversation.lead_id,
             "customer_message": conversation.message,
-            "ai_response": ai_response
+            "ai_response": ai_response,
+            "conversation_length": len(conversation_history[conversation.lead_id])
         }
         
     except Exception as e:
         print(f"OpenAI API Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
 
+@app.get("/conversation/history/{lead_id}")
+def get_conversation_history(lead_id: str):
+    """Get conversation history for a specific lead"""
+    if lead_id not in conversation_history:
+        return {"conversation_history": [], "message": "No conversation history found for this lead"}
+    
+    return {
+        "lead_id": lead_id,
+        "conversation_history": conversation_history[lead_id],
+        "total_messages": len(conversation_history[lead_id])
+    }
 
+@app.delete("/conversation/history/{lead_id}")
+def clear_conversation_history(lead_id: str):
+    """Clear conversation history for a specific lead"""
+    if lead_id in conversation_history:
+        del conversation_history[lead_id]
+        return {"message": f"Conversation history cleared for lead {lead_id}"}
+    else:
+        raise HTTPException(status_code=404, detail="No conversation history found for this lead")
 
 if __name__ == "__main__":
     import uvicorn
