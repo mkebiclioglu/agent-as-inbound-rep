@@ -1,9 +1,11 @@
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import openai
+from twilio_client import TwilioVoiceClient
 
 # Load environment variables
 load_dotenv()
@@ -33,19 +35,23 @@ class ConversationMessage(BaseModel):
 
 
 # Mock data for MVP
+customer_phone = os.getenv("CUSTOMER_PHONE_NUMBER", "+1-555-0123")  # Default fallback
 mock_leads = [
     {
         "id": "lead_001",
         "name": "John Smith",
         "email": "john.smith@techcompany.com",
-        "phone": "+1-555-0123",
+        "phone": customer_phone,
         "company": "TechCorp Industries",
         "inquiry": "Interested in industrial 3D printers for prototyping. Need high precision and large build volume."
-    },
+    }
 ]
 
 # Conversation history storage
 conversation_history = {}
+
+# Initialize Twilio client
+twilio_client = TwilioVoiceClient()
 
 # Simple product knowledge base
 product_knowledge = {
@@ -180,6 +186,126 @@ def clear_conversation_history(lead_id: str):
         return {"message": f"Conversation history cleared for lead {lead_id}"}
     else:
         raise HTTPException(status_code=404, detail="No conversation history found for this lead")
+
+@app.get("/customer/phone/{lead_id}")
+def get_customer_phone(lead_id: str):
+    """Get customer phone number for call initiation"""
+    for lead in mock_leads:
+        if lead["id"] == lead_id:
+            return {
+                "lead_id": lead_id,
+                "customer_name": lead["name"],
+                "phone_number": lead["phone"],
+                "company": lead["company"]
+            }
+    raise HTTPException(status_code=404, detail="Lead not found")
+
+@app.post("/voice/initiate-call/{lead_id}")
+def initiate_call(lead_id: str):
+    """Initiate a voice call to the customer"""
+    try:
+        # Get customer info
+        customer_info = get_customer_phone(lead_id)
+        
+        # Create webhook URL for this call
+        webhook_base_url = os.getenv("WEBHOOK_BASE_URL")
+        if not webhook_base_url:
+            raise HTTPException(status_code=500, detail="WEBHOOK_BASE_URL not configured. Please set it in your .env file.")
+        
+        webhook_url = f"{webhook_base_url}/voice/gather?lead_id={lead_id}"
+        
+        # Make the call
+        call_sid = twilio_client.make_call(
+            to_number=customer_info["phone_number"],
+            webhook_url=webhook_url
+        )
+        
+        return {
+            "message": "Call initiated successfully",
+            "call_sid": call_sid,
+            "customer_name": customer_info["customer_name"],
+            "phone_number": customer_info["phone_number"]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error initiating call: {str(e)}")
+
+@app.post("/voice/gather")
+async def gather_speech(request: Request, lead_id: str = Form(None)):
+    """Initial greeting and speech gathering"""
+    try:
+        print(f"🔍 Gather endpoint called with lead_id: {lead_id}")
+        print(f"🔍 Query params: {request.query_params}")
+        
+        # If lead_id is not in form data, try to get it from query parameters
+        if not lead_id:
+            lead_id = request.query_params.get("lead_id")
+            print(f"🔍 Got lead_id from query params: {lead_id}")
+        
+        if not lead_id:
+            # Default to lead_001 if no lead_id provided
+            lead_id = "lead_001"
+            print(f"🔍 Using default lead_id: {lead_id}")
+        
+        # Get customer info
+        customer_info = get_customer_phone(lead_id)
+        print(f"🔍 Customer info: {customer_info}")
+        
+        # Create greeting message
+        greeting = f"Hello {customer_info['customer_name']}, this is Sarah from Formlabs. I noticed you showed interest in our 3D printers. I'd love to learn more about your needs and see how we can help you achieve your goals. What specific applications are you looking to use 3D printing for?"
+        
+        # Create TwiML response
+        twiml_response = twilio_client.create_gather_response(greeting)
+        print(f"🔍 TwiML response created successfully")
+        
+        return Response(content=twiml_response, media_type="application/xml")
+        
+    except Exception as e:
+        print(f"❌ Error in gather endpoint: {str(e)}")
+        # Return a simple error response instead of raising HTTPException
+        error_response = twilio_client.create_final_response("I apologize for the technical difficulties. Please call us back later. Thank you!")
+        return Response(content=error_response, media_type="application/xml")
+
+@app.post("/voice/process-speech")
+async def process_speech(
+    request: Request,
+    lead_id: str = Form(None),
+    SpeechResult: str = Form(None)
+):
+    """Process speech input and generate AI response"""
+    # If lead_id is not in form data, try to get it from query parameters
+    if not lead_id:
+        lead_id = request.query_params.get("lead_id")
+    
+    if not lead_id:
+        # Default to lead_001 if no lead_id provided
+        lead_id = "lead_001"
+    
+    try:
+        print(f"🔍 Process speech called with lead_id: {lead_id}, SpeechResult: {SpeechResult}")
+        
+        if not SpeechResult:
+            # No speech detected, ask to repeat
+            print("🔍 No speech detected, asking to repeat")
+            twiml_response = twilio_client.create_gather_response("I didn't catch that. Could you please repeat your question?")
+            return Response(content=twiml_response, media_type="application/xml")
+        
+        # Generate AI response
+        print(f"🔍 Generating AI response for: {SpeechResult}")
+        conversation = ConversationMessage(message=SpeechResult, lead_id=lead_id)
+        chat_result = chat_with_lead(conversation)
+        
+        # Create voice response
+        print(f"🔍 AI response: {chat_result['ai_response']}")
+        twiml_response = twilio_client.create_gather_response(chat_result["ai_response"])
+        
+        return Response(content=twiml_response, media_type="application/xml")
+        
+    except Exception as e:
+        print(f"❌ Error in process_speech endpoint: {str(e)}")
+        # Error handling - end call gracefully
+        twiml_response = twilio_client.create_final_response("I apologize for the technical difficulties. Please call us back later. Thank you!")
+        return Response(content=twiml_response, media_type="application/xml")
 
 if __name__ == "__main__":
     import uvicorn
