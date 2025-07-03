@@ -251,8 +251,16 @@ async def gather_speech(request: Request, lead_id: str = Form(None)):
         customer_info = get_customer_phone(lead_id)
         print(f"🔍 Customer info: {customer_info}")
         
-        # Create greeting message
-        greeting = f"Hello {customer_info['customer_name']}, this is Sarah from Formlabs. I noticed you showed interest in our 3D printers. I'd love to learn more about your needs and see how we can help you achieve your goals. What specific applications are you looking to use 3D printing for?"
+        # Create greeting message with SSML for natural speech
+        greeting = f"""<speak>
+            Hello {customer_info['customer_name']}, this is Sarah from Formlabs. 
+            <break time="0.5s"/>
+            I noticed you showed interest in our 3D printers. 
+            <break time="0.3s"/>
+            I'd love to learn more about your needs and see how we can help you achieve your goals. 
+            <break time="0.5s"/>
+            What specific applications are you looking to use 3D printing for?
+        </speak>"""
         
         # Create TwiML response
         twiml_response = twilio_client.create_gather_response(greeting)

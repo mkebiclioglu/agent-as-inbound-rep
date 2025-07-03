@@ -49,14 +49,15 @@ class TwilioVoiceClient:
                 action='/voice/process-speech',
                 method='POST'
             )
-            gather.say(message, voice='alice')
+            # Use neural voice for more natural sound with SSML support
+            gather.say(message, voice='Google.en-US-Neural2-F', language='en-US')
             
             # If no input is received, repeat the message
-            response.say("I didn't catch that. Let me repeat.", voice='alice')
+            response.say("I didn't catch that. Let me repeat.", voice='Google.en-US-Neural2-F', language='en-US')
             response.redirect('/voice/gather')
         else:
             # Just say the message without gathering input
-            response.say(message, voice='alice')
+            response.say(message, voice='Google.en-US-Neural2-F', language='en-US')
             response.hangup()
         
         return str(response)
@@ -71,10 +72,11 @@ class TwilioVoiceClient:
             action='/voice/process-speech',
             method='POST'
         )
-        gather.say(message, voice='alice')
+        # Use neural voice for more natural sound
+        gather.say(message, voice='Google.en-US-Neural2-F', language='en-US')
         
         # If no input is received, end the call
-        response.say("Thank you for your time. Goodbye!", voice='alice')
+        response.say("Thank you for your time. Goodbye!", voice='Google.en-US-Neural2-F', language='en-US')
         response.hangup()
         
         return str(response)
@@ -82,6 +84,6 @@ class TwilioVoiceClient:
     def create_final_response(self, message: str):
         """Create final response before ending call"""
         response = VoiceResponse()
-        response.say(message, voice='alice')
+        response.say(message, voice='Google.en-US-Neural2-F', language='en-US')
         response.hangup()
         return str(response) 
