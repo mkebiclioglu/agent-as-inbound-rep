@@ -43,7 +43,7 @@ def test_twilio_verification():
             print("\n🔧 Solution: Re-verify your phone number in Twilio Console")
             print("1. Go to https://console.twilio.com/")
             print("2. Navigate to Phone Numbers → Verified Caller IDs")
-            print("3. Add your number +16175106633 again")
+            print(f"3. Add your number {customer_phone} again")
             print("4. Complete the verification process")
         elif "trial" in str(e).lower():
             print("\n🔧 Solution: Upgrade to a paid Twilio account or verify your number")

@@ -19,8 +19,8 @@ print(f"📞 Twilio Phone: {twilio_phone}")
 account_sid = os.getenv("TWILIO_ACCOUNT_SID")
 auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
-print(f"🔑 Account SID: {account_sid[:10]}..." if account_sid else "❌ Not set")
-print(f"🔑 Auth Token: {auth_token[:10]}..." if auth_token else "❌ Not set")
+print(f"🔑 Account SID: {account_sid[:6]}..." if account_sid else "❌ Not set")
+print("🔑 Auth Token: set" if auth_token else "❌ Not set")
 
 # Check webhook URL
 webhook_url = os.getenv("WEBHOOK_BASE_URL")

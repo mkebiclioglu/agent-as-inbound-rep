@@ -1,21 +1,19 @@
 import os
 from dotenv import load_dotenv
-import openai
+from openai import OpenAI
 
 # Load environment variables
 load_dotenv()
-
-# Configure OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
 def test_openai_connection():
     """Test if OpenAI API key is working"""
     try:
         print("🔑 Testing OpenAI API key...")
-        print(f"API Key (first 10 chars): {os.getenv('OPENAI_API_KEY')[:10]}...")
+        print("API Key: set" if os.getenv("OPENAI_API_KEY") else "API Key: NOT set")
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         
         # Simple test request
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "user", "content": "Say 'Hello, API is working!'"}

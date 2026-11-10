@@ -1,10 +1,12 @@
 import os
+import secrets
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Form
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
-import openai
+from openai import OpenAI
+from twilio.request_validator import RequestValidator
 from twilio_client import TwilioVoiceClient
 
 # Load environment variables
@@ -14,11 +16,52 @@ load_dotenv()
 app = FastAPI(title="AI Sales Agent", description="AI-powered inbound sales representative")
 
 # Configure OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
-if not openai.api_key:
+openai_api_key = os.getenv("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
+if not openai_client:
     print("Warning: OPENAI_API_KEY not found in environment variables!")
     print("Please create a .env file with your OpenAI API key.")
     print("You can copy env.example to .env and add your key.")
+
+MAX_MESSAGE_LENGTH = 4000
+MAX_HISTORY_MESSAGES = 50
+
+
+def require_api_access(request: Request, x_api_key: Optional[str] = Header(None)):
+    """Protect the API: these endpoints place calls, spend OpenAI credits and return lead data.
+
+    With API_KEY set, callers must send it as X-API-Key. Without it, only direct
+    requests from this machine are served (not ones arriving through ngrok or a proxy).
+    """
+    api_key = os.getenv("API_KEY")
+    if api_key:
+        if not x_api_key or not secrets.compare_digest(x_api_key.encode(), api_key.encode()):
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+        return
+    client_host = request.client.host if request.client else ""
+    forwarded = any(h in request.headers for h in ("x-forwarded-for", "x-forwarded-host", "forwarded"))
+    if client_host not in ("127.0.0.1", "::1") or forwarded:
+        raise HTTPException(status_code=403, detail="Set API_KEY to use this endpoint remotely")
+
+
+async def require_twilio_signature(request: Request):
+    """Only accept voice webhooks that carry a valid Twilio signature."""
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    webhook_base_url = os.getenv("WEBHOOK_BASE_URL")
+    if not auth_token or not webhook_base_url:
+        raise HTTPException(status_code=403, detail="Twilio webhook validation is not configured")
+    url = webhook_base_url.rstrip("/") + request.url.path
+    if request.url.query:
+        url += "?" + request.url.query
+    form = await request.form()
+    params = {key: value for key, value in form.items() if isinstance(value, str)}
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not RequestValidator(auth_token).validate(url, params, signature):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+
+api_access = [Depends(require_api_access)]
+twilio_webhook = [Depends(require_twilio_signature)]
 
 # Pydantic models
 class Lead(BaseModel):
@@ -29,7 +72,7 @@ class Lead(BaseModel):
     inquiry: str
 
 class ConversationMessage(BaseModel):
-    message: str
+    message: str = Field(max_length=MAX_MESSAGE_LENGTH)
     lead_id: str
 
 
@@ -76,12 +119,12 @@ product_knowledge = {
 def read_root():
     return {"message": "AI Sales Agent is running!"}
 
-@app.get("/leads")
+@app.get("/leads", dependencies=api_access)
 def get_leads():
     """Get all available leads"""
     return {"leads": mock_leads}
 
-@app.get("/leads/{lead_id}")
+@app.get("/leads/{lead_id}", dependencies=api_access)
 def get_lead(lead_id: str):
     """Get a specific lead by ID"""
     for lead in mock_leads:
@@ -89,7 +132,7 @@ def get_lead(lead_id: str):
             return lead
     raise HTTPException(status_code=404, detail="Lead not found")
 
-@app.post("/conversation/chat")
+@app.post("/conversation/chat", dependencies=api_access)
 def chat_with_lead(conversation: ConversationMessage):
     """Generate AI response for customer conversation"""
     try:
@@ -143,7 +186,9 @@ Try to guide the conversation to the next step in the sales process which is eit
         messages.append({"role": "user", "content": conversation.message})
         
         # Generate response using OpenAI
-        response = openai.ChatCompletion.create(
+        if not openai_client:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+        response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
             max_tokens=200,
@@ -154,6 +199,7 @@ Try to guide the conversation to the next step in the sales process which is eit
         # Store the conversation in history
         conversation_history[conversation.lead_id].append({"role": "user", "content": conversation.message})
         conversation_history[conversation.lead_id].append({"role": "assistant", "content": ai_response})
+        del conversation_history[conversation.lead_id][:-MAX_HISTORY_MESSAGES]
         
         return {
             "lead_id": conversation.lead_id,
@@ -162,11 +208,13 @@ Try to guide the conversation to the next step in the sales process which is eit
             "conversation_length": len(conversation_history[conversation.lead_id])
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"OpenAI API Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error generating response")
 
-@app.get("/conversation/history/{lead_id}")
+@app.get("/conversation/history/{lead_id}", dependencies=api_access)
 def get_conversation_history(lead_id: str):
     """Get conversation history for a specific lead"""
     if lead_id not in conversation_history:
@@ -178,7 +226,7 @@ def get_conversation_history(lead_id: str):
         "total_messages": len(conversation_history[lead_id])
     }
 
-@app.delete("/conversation/history/{lead_id}")
+@app.delete("/conversation/history/{lead_id}", dependencies=api_access)
 def clear_conversation_history(lead_id: str):
     """Clear conversation history for a specific lead"""
     if lead_id in conversation_history:
@@ -187,7 +235,7 @@ def clear_conversation_history(lead_id: str):
     else:
         raise HTTPException(status_code=404, detail="No conversation history found for this lead")
 
-@app.get("/customer/phone/{lead_id}")
+@app.get("/customer/phone/{lead_id}", dependencies=api_access)
 def get_customer_phone(lead_id: str):
     """Get customer phone number for call initiation"""
     for lead in mock_leads:
@@ -200,7 +248,7 @@ def get_customer_phone(lead_id: str):
             }
     raise HTTPException(status_code=404, detail="Lead not found")
 
-@app.post("/voice/initiate-call/{lead_id}")
+@app.post("/voice/initiate-call/{lead_id}", dependencies=api_access)
 def initiate_call(lead_id: str):
     """Initiate a voice call to the customer"""
     try:
@@ -212,7 +260,7 @@ def initiate_call(lead_id: str):
         if not webhook_base_url:
             raise HTTPException(status_code=500, detail="WEBHOOK_BASE_URL not configured. Please set it in your .env file.")
         
-        webhook_url = f"{webhook_base_url}/voice/gather?lead_id={lead_id}"
+        webhook_url = f"{webhook_base_url.rstrip('/')}/voice/gather?lead_id={lead_id}"
         
         # Make the call
         call_sid = twilio_client.make_call(
@@ -227,10 +275,13 @@ def initiate_call(lead_id: str):
             "phone_number": customer_info["phone_number"]
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error initiating call: {str(e)}")
+        print(f"Error initiating call: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error initiating call")
 
-@app.post("/voice/gather")
+@app.post("/voice/gather", dependencies=twilio_webhook)
 async def gather_speech(request: Request, lead_id: str = Form(None)):
     """Initial greeting and speech gathering"""
     try:
@@ -274,7 +325,7 @@ async def gather_speech(request: Request, lead_id: str = Form(None)):
         error_response = twilio_client.create_final_response("I apologize for the technical difficulties. Please call us back later. Thank you!")
         return Response(content=error_response, media_type="application/xml")
 
-@app.post("/voice/process-speech")
+@app.post("/voice/process-speech", dependencies=twilio_webhook)
 async def process_speech(
     request: Request,
     lead_id: str = Form(None),
@@ -317,4 +368,5 @@ async def process_speech(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    # ngrok forwards to localhost, so there is no need to listen on every interface
+    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=8000) 
